@@ -1,12 +1,13 @@
 import 'dart:async';
 import 'dart:math';
 import 'package:flutter/material.dart';
-import 'package:audioplayers/audioplayers.dart';
+import 'package:audio_service/audio_service.dart';
+import 'background_audio_handler.dart';
 import 'database.dart';
 
 class MeditationTimerScreen extends StatefulWidget {
   final int durationInMinutes;
-  final int? albumId; // May be null if user chooses "Not use"
+  final int? albumId; // Null => "Not use"
   final bool isEnglish;
 
   const MeditationTimerScreen({
@@ -21,23 +22,25 @@ class MeditationTimerScreen extends StatefulWidget {
 }
 
 class _MeditationTimerScreenState extends State<MeditationTimerScreen> {
+  late int totalDuration; // total in seconds
   late int remainingSeconds;
-  Timer? timer;
-  bool isRunning = false;
+  DateTime? _startTime;
+  Timer? _timer;
   bool isPaused = false;
+  bool isRunning = false;
 
-  // Audio playback
-  AudioPlayer audioPlayer = AudioPlayer();
-  bool audioStarted = false;
-  Timer? musicTimer;
+  // Audio
+  AudioHandler? _audioHandler;
   String chosenTrackPath = "";
-  int chosenTrackDuration = 0;
+  int chosenTrackDuration = 0; // in seconds
 
   @override
   void initState() {
     super.initState();
-    remainingSeconds = widget.durationInMinutes * 60;
-    // If an album is chosen, load a random track; otherwise, start without music.
+    totalDuration = widget.durationInMinutes * 60;
+    remainingSeconds = totalDuration;
+
+    // If user chose an album, load a random track. Otherwise, no music.
     if (widget.albumId != null) {
       _initTrackAndStart();
     } else {
@@ -45,96 +48,147 @@ class _MeditationTimerScreenState extends State<MeditationTimerScreen> {
     }
   }
 
+  /// Fetch a random track from the chosen album, then start the meditation.
   Future<void> _initTrackAndStart() async {
     final tracks = await AppDatabase.instance.getTracksForAlbum(widget.albumId!);
     if (tracks.isEmpty) {
       _startMeditation();
       return;
     }
+
     final random = Random();
     final trackIndex = random.nextInt(tracks.length);
     final track = tracks[trackIndex];
-    chosenTrackPath = track['filePath'] as String;
-    chosenTrackDuration = track['duration'] as int;
+
+    setState(() {
+      chosenTrackPath = track['filePath'] as String;
+      chosenTrackDuration = track['duration'] as int;
+
+      // If your DB entry omits "assets/", prepend it
+      if (!chosenTrackPath.startsWith("assets/")) {
+        chosenTrackPath = "assets/" + chosenTrackPath;
+      }
+    });
+
     _startMeditation();
   }
 
-  void _startMeditation() {
+  void _startMeditation() async {
+    print("[DEBUG] _startMeditation() called");
+    // 1) Stop old timer/audio handler if they exist.
+    _timer?.cancel();
+    if (_audioHandler != null) {
+      await _audioHandler!.stop();
+      _audioHandler = null;
+      // Add a brief delay to allow iOS to tear down the previous session.
+      await Future.delayed(const Duration(milliseconds: 200));
+    }
+
+    // 2) Reset state.
     setState(() {
+      _startTime = DateTime.now();
       isRunning = true;
       isPaused = false;
+      remainingSeconds = totalDuration;
     });
-    // Schedule audio playback if a track is selected.
+
+    // 3) If a track is chosen, initialize the background audio handler.
     if (chosenTrackPath.isNotEmpty) {
-      if (chosenTrackDuration >= remainingSeconds) {
-        _startAudio();
-      } else {
-        final delay = remainingSeconds - chosenTrackDuration;
-        musicTimer = Timer(Duration(seconds: delay), () {
-          _startAudio();
-        });
+      int audioStartTime = totalDuration - chosenTrackDuration;
+      if (audioStartTime < 0) {
+        audioStartTime = 0; // start immediately if track is longer than meditation.
       }
+
+      _audioHandler = await AudioService.init(
+        builder: () => MeditationAudioHandler(
+          totalDuration: totalDuration,
+          audioStartOffset: audioStartTime,
+          assetPath: chosenTrackPath,
+        ),
+        config: const AudioServiceConfig(
+          androidNotificationChannelId:
+          'com.example.my_meditation_app.channel.audio',
+          androidNotificationChannelName: 'Meditation Audio',
+          androidNotificationOngoing: true,
+        ),
+      );
+
+      // Start scheduling audio in the background handler.
+      await (_audioHandler as dynamic).startMeditation();
     }
-    timer = Timer.periodic(const Duration(seconds: 1), (t) {
-      if (!isPaused) {
-        if (remainingSeconds > 0) {
-          setState(() {
-            remainingSeconds--;
-          });
-        } else {
+
+    // 4) Start the UI timer using DateTime for accuracy.
+    print("[DEBUG] Timer tick");
+    _timer = Timer.periodic(const Duration(seconds: 1), (Timer t) {
+      if (!isPaused && _startTime != null) {
+        final elapsed = DateTime.now().difference(_startTime!).inSeconds;
+        final newRemaining = totalDuration - elapsed;
+        if (newRemaining <= 0) {
           t.cancel();
-          audioPlayer.stop();
           setState(() {
+            remainingSeconds = 0;
             isRunning = false;
+          });
+          // Stop audio when time is up.
+          _audioHandler?.stop();
+        } else {
+          setState(() {
+            remainingSeconds = newRemaining;
           });
         }
       }
     });
   }
 
-  void _startAudio() async {
-    if (!audioStarted && chosenTrackPath.isNotEmpty) {
-      audioStarted = true;
-      await audioPlayer.play(AssetSource(chosenTrackPath));
-    }
+  void _exitMeditation() async {
+    _timer?.cancel();
+    await _audioHandler?.stop();
+    _audioHandler = null;
+    Navigator.pop(context);
   }
 
+
+  /// Pause the meditation timer and audio.
   void _pauseMeditation() {
     setState(() {
       isPaused = true;
     });
-    timer?.cancel();
-    musicTimer?.cancel();
-    audioPlayer.pause();
+    _timer?.cancel();
+    // Pause audio in the background handler
+    _audioHandler?.pause();
   }
 
+  /// Resume the meditation timer and audio.
   void _resumeMeditation() {
     setState(() {
       isPaused = false;
     });
-    timer = Timer.periodic(const Duration(seconds: 1), (t) {
-      if (!isPaused) {
-        if (remainingSeconds > 0) {
-          setState(() {
-            remainingSeconds--;
-          });
-        } else {
+    // Adjust startTime so elapsed time remains correct
+    if (_startTime != null) {
+      final pausedElapsed = totalDuration - remainingSeconds;
+      _startTime = DateTime.now().subtract(Duration(seconds: pausedElapsed));
+    }
+
+    _timer = Timer.periodic(const Duration(seconds: 1), (Timer t) {
+      if (!isPaused && _startTime != null) {
+        final elapsed = DateTime.now().difference(_startTime!).inSeconds;
+        final newRemaining = totalDuration - elapsed;
+        if (newRemaining <= 0) {
           t.cancel();
-          audioPlayer.stop();
           setState(() {
+            remainingSeconds = 0;
             isRunning = false;
+          });
+          _audioHandler?.stop();
+        } else {
+          setState(() {
+            remainingSeconds = newRemaining;
           });
         }
       }
     });
-    audioPlayer.resume();
-  }
-
-  void _exitMeditation() {
-    timer?.cancel();
-    musicTimer?.cancel();
-    audioPlayer.stop();
-    Navigator.pop(context);
+    // Resume audio
+    _audioHandler?.play();
   }
 
   String _formatTime(int seconds) {
@@ -144,14 +198,21 @@ class _MeditationTimerScreenState extends State<MeditationTimerScreen> {
   }
 
   @override
+  void dispose() {
+    _timer?.cancel();
+    _audioHandler?.stop();
+    _audioHandler = null;
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    double progress = 0;
-    if (widget.durationInMinutes > 0) {
-      final totalSeconds = widget.durationInMinutes * 60;
-      progress = (totalSeconds - remainingSeconds) / totalSeconds;
-    }
+    final progress = (totalDuration - remainingSeconds) / totalDuration;
+
     return Scaffold(
-      // Consistent gradient background.
+      appBar: AppBar(
+        title: Text(widget.isEnglish ? 'Meditation' : 'Thiền'),
+      ),
       body: Container(
         decoration: const BoxDecoration(
           gradient: LinearGradient(
@@ -169,7 +230,7 @@ class _MeditationTimerScreenState extends State<MeditationTimerScreen> {
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  // Circular progress indicator with timer text.
+                  // Timer circle
                   Container(
                     width: 250,
                     height: 250,
@@ -193,24 +254,32 @@ class _MeditationTimerScreenState extends State<MeditationTimerScreen> {
                           child: CircularProgressIndicator(
                             value: progress,
                             strokeWidth: 12,
-                            backgroundColor: Colors.pinkAccent.shade100.withOpacity(0.3),
-                            valueColor: AlwaysStoppedAnimation<Color>(Colors.pinkAccent.shade100),
+                            backgroundColor:
+                            Colors.pinkAccent.shade100.withOpacity(0.3),
+                            valueColor: AlwaysStoppedAnimation<Color>(
+                              Colors.pinkAccent.shade100,
+                            ),
                           ),
                         ),
                         Text(
                           _formatTime(remainingSeconds),
-                          style: const TextStyle(fontSize: 32, fontWeight: FontWeight.bold),
+                          style: const TextStyle(
+                            fontSize: 32,
+                            fontWeight: FontWeight.bold,
+                          ),
                         ),
                       ],
                     ),
                   ),
                   const SizedBox(height: 20),
+                  // Show music duration if we have a track
                   if (chosenTrackPath.isNotEmpty)
                     Text(
                       '${widget.isEnglish ? "Music Duration" : "Thời lượng nhạc"}: ${_formatTime(chosenTrackDuration)}',
                       style: const TextStyle(fontSize: 16),
                     ),
                   const SizedBox(height: 30),
+                  // Buttons
                   Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
@@ -224,7 +293,10 @@ class _MeditationTimerScreenState extends State<MeditationTimerScreen> {
                         },
                         style: ElevatedButton.styleFrom(
                           backgroundColor: Colors.pinkAccent.shade100,
-                          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 24,
+                            vertical: 12,
+                          ),
                           textStyle: const TextStyle(fontSize: 16),
                         ),
                         icon: Icon(isPaused ? Icons.play_arrow : Icons.pause),
@@ -240,11 +312,16 @@ class _MeditationTimerScreenState extends State<MeditationTimerScreen> {
                           onPressed: _exitMeditation,
                           style: ElevatedButton.styleFrom(
                             backgroundColor: Colors.redAccent,
-                            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 24,
+                              vertical: 12,
+                            ),
                             textStyle: const TextStyle(fontSize: 16),
                           ),
                           icon: const Icon(Icons.exit_to_app),
-                          label: Text(widget.isEnglish ? 'Exit' : 'Thoát'),
+                          label: Text(
+                            widget.isEnglish ? 'Exit' : 'Thoát',
+                          ),
                         ),
                     ],
                   ),

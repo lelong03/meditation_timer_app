@@ -15,7 +15,7 @@ class _MeditationOptionsScreenState extends State<MeditationOptionsScreen> {
 
   // Albums loaded from the database.
   List<Map<String, dynamic>> albums = [];
-  int? selectedAlbumId; // Null => "Not use", but we won't set this by default.
+  int? selectedAlbumId; // Null => "Not use"
 
   bool isEnglish = false;
 
@@ -30,11 +30,10 @@ class _MeditationOptionsScreenState extends State<MeditationOptionsScreen> {
     setState(() {
       albums = dbAlbums;
       // If we have at least one album, select the first album by default
-      // (so "Not use" is NOT selected by default).
       if (albums.isNotEmpty) {
         selectedAlbumId = albums.first['id'] as int;
       } else {
-        // If no albums, user can only choose "Not use" later.
+        // If no albums, user can only choose "Not use" later
         selectedAlbumId = null;
       }
     });
