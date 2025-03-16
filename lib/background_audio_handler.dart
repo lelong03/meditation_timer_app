@@ -4,9 +4,11 @@ import 'package:just_audio/just_audio.dart';
 
 /// A custom background audio handler for meditation music playback.
 class MeditationAudioHandler extends BaseAudioHandler {
-  final int totalDuration;     // Total meditation duration in seconds.
-  final int audioStartOffset;  // When to start audio playback (seconds from start).
-  final String assetPath;      // e.g. "assets/audio/album1/track.mp3"
+  // The fields you had before
+  int totalDuration;     // in seconds
+  int audioStartOffset;  // in seconds
+  String assetPath;      // e.g. "assets/audio/album1/track.mp3"
+
   final AudioPlayer _player = AudioPlayer();
   DateTime? _startTime;
   Timer? _timer;
@@ -18,12 +20,31 @@ class MeditationAudioHandler extends BaseAudioHandler {
     required this.assetPath,
   });
 
-  /// Start the meditation audio scheduling.
+  /// A new method to update fields for each new session, then start scheduling.
+  Future<void> startNewSession({
+    required int totalDuration,
+    required int audioStartOffset,
+    required String assetPath,
+  }) async {
+    // 1) Stop any previous session so we start fresh
+    await stop();
+
+    // 2) Update fields
+    this.totalDuration = totalDuration;
+    this.audioStartOffset = audioStartOffset;
+    this.assetPath = assetPath;
+    _audioStarted = false;
+
+    // 3) Call the existing logic to schedule playback
+    await startMeditation();
+  }
+
+  /// Start the meditation audio scheduling (your existing code).
   Future<void> startMeditation() async {
     _startTime = DateTime.now();
 
     // If offset == 0, start audio immediately.
-    if (audioStartOffset == 0 && !_audioStarted) {
+    if (audioStartOffset == 0 && !_audioStarted && assetPath.isNotEmpty) {
       _audioStarted = true;
       try {
         await _player.setAsset(assetPath);
@@ -58,15 +79,13 @@ class MeditationAudioHandler extends BaseAudioHandler {
 
   @override
   Future<void> pause() async {
-    // Pause the audio if it's playing.
     await _player.pause();
     return super.pause();
   }
 
   @override
   Future<void> play() async {
-    // If we haven't yet loaded the asset, do so now.
-    if (!_audioStarted) {
+    if (!_audioStarted && assetPath.isNotEmpty) {
       _audioStarted = true;
       await _player.setAsset(assetPath);
     }

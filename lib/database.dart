@@ -89,6 +89,12 @@ class AppDatabase {
     }
   }
 
+  Future<void> dumpTracks() async {
+    final db = await database;
+    final result = await db.query('tracks');
+    print("Tracks in DB: $result");
+  }
+
   Future<void> createSampleAlbumsAndTracks() async {
     // Sample album and track – update paths and durations as needed.
     int albumId1 = await insertAlbum("Tâm Quán Niệm Xứ (Cô Thu)");

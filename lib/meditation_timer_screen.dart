@@ -1,9 +1,10 @@
 import 'dart:async';
 import 'dart:math';
 import 'package:flutter/material.dart';
-import 'package:audio_service/audio_service.dart';
 import 'background_audio_handler.dart';
 import 'database.dart';
+import 'package:audio_service/audio_service.dart';
+import 'main.dart'; // import so we can access globalAudioHandler
 
 class MeditationTimerScreen extends StatefulWidget {
   final int durationInMinutes;
@@ -29,8 +30,9 @@ class _MeditationTimerScreenState extends State<MeditationTimerScreen> {
   bool isPaused = false;
   bool isRunning = false;
 
-  // Audio
-  AudioHandler? _audioHandler;
+  // We'll reuse the global audio handler, not create a new one.
+  AudioHandler get _audioHandler => globalAudioHandler;
+
   String chosenTrackPath = "";
   int chosenTrackDuration = 0; // in seconds
 
@@ -64,7 +66,6 @@ class _MeditationTimerScreenState extends State<MeditationTimerScreen> {
       chosenTrackPath = track['filePath'] as String;
       chosenTrackDuration = track['duration'] as int;
 
-      // If your DB entry omits "assets/", prepend it
       if (!chosenTrackPath.startsWith("assets/")) {
         chosenTrackPath = "assets/" + chosenTrackPath;
       }
@@ -75,16 +76,16 @@ class _MeditationTimerScreenState extends State<MeditationTimerScreen> {
 
   void _startMeditation() async {
     print("[DEBUG] _startMeditation() called");
-    // 1) Stop old timer/audio handler if they exist.
-    _timer?.cancel();
-    if (_audioHandler != null) {
-      await _audioHandler!.stop();
-      _audioHandler = null;
-      // Add a brief delay to allow iOS to tear down the previous session.
-      await Future.delayed(const Duration(milliseconds: 200));
-    }
 
-    // 2) Reset state.
+    // 1) Stop old timer if any
+    _timer?.cancel();
+
+    // 2) Stop the previous session in the global audio handler
+    await _audioHandler.stop();
+    // Brief delay to let it tear down
+    await Future.delayed(const Duration(milliseconds: 200));
+
+    // 3) Reset state
     setState(() {
       _startTime = DateTime.now();
       isRunning = true;
@@ -92,32 +93,21 @@ class _MeditationTimerScreenState extends State<MeditationTimerScreen> {
       remainingSeconds = totalDuration;
     });
 
-    // 3) If a track is chosen, initialize the background audio handler.
+    // 4) If a track is chosen, call startNewSession(...) on the global handler
     if (chosenTrackPath.isNotEmpty) {
       int audioStartTime = totalDuration - chosenTrackDuration;
       if (audioStartTime < 0) {
-        audioStartTime = 0; // start immediately if track is longer than meditation.
+        audioStartTime = 0;
       }
-
-      _audioHandler = await AudioService.init(
-        builder: () => MeditationAudioHandler(
-          totalDuration: totalDuration,
-          audioStartOffset: audioStartTime,
-          assetPath: chosenTrackPath,
-        ),
-        config: const AudioServiceConfig(
-          androidNotificationChannelId:
-          'com.example.my_meditation_app.channel.audio',
-          androidNotificationChannelName: 'Meditation Audio',
-          androidNotificationOngoing: true,
-        ),
+      // This replaces AudioService.init(...)
+      await (globalAudioHandler as MeditationAudioHandler).startNewSession(
+        totalDuration: totalDuration,
+        audioStartOffset: audioStartTime,
+        assetPath: chosenTrackPath,
       );
-
-      // Start scheduling audio in the background handler.
-      await (_audioHandler as dynamic).startMeditation();
     }
 
-    // 4) Start the UI timer using DateTime for accuracy.
+    // 5) Start the UI timer
     print("[DEBUG] Timer tick");
     _timer = Timer.periodic(const Duration(seconds: 1), (Timer t) {
       if (!isPaused && _startTime != null) {
@@ -130,7 +120,7 @@ class _MeditationTimerScreenState extends State<MeditationTimerScreen> {
             isRunning = false;
           });
           // Stop audio when time is up.
-          _audioHandler?.stop();
+          _audioHandler.stop();
         } else {
           setState(() {
             remainingSeconds = newRemaining;
@@ -142,11 +132,9 @@ class _MeditationTimerScreenState extends State<MeditationTimerScreen> {
 
   void _exitMeditation() async {
     _timer?.cancel();
-    await _audioHandler?.stop();
-    _audioHandler = null;
+    await _audioHandler.stop();
     Navigator.pop(context);
   }
-
 
   /// Pause the meditation timer and audio.
   void _pauseMeditation() {
@@ -154,8 +142,7 @@ class _MeditationTimerScreenState extends State<MeditationTimerScreen> {
       isPaused = true;
     });
     _timer?.cancel();
-    // Pause audio in the background handler
-    _audioHandler?.pause();
+    _audioHandler.pause();
   }
 
   /// Resume the meditation timer and audio.
@@ -163,7 +150,6 @@ class _MeditationTimerScreenState extends State<MeditationTimerScreen> {
     setState(() {
       isPaused = false;
     });
-    // Adjust startTime so elapsed time remains correct
     if (_startTime != null) {
       final pausedElapsed = totalDuration - remainingSeconds;
       _startTime = DateTime.now().subtract(Duration(seconds: pausedElapsed));
@@ -179,7 +165,7 @@ class _MeditationTimerScreenState extends State<MeditationTimerScreen> {
             remainingSeconds = 0;
             isRunning = false;
           });
-          _audioHandler?.stop();
+          _audioHandler.stop();
         } else {
           setState(() {
             remainingSeconds = newRemaining;
@@ -187,8 +173,7 @@ class _MeditationTimerScreenState extends State<MeditationTimerScreen> {
         }
       }
     });
-    // Resume audio
-    _audioHandler?.play();
+    _audioHandler.play();
   }
 
   String _formatTime(int seconds) {
@@ -200,8 +185,7 @@ class _MeditationTimerScreenState extends State<MeditationTimerScreen> {
   @override
   void dispose() {
     _timer?.cancel();
-    _audioHandler?.stop();
-    _audioHandler = null;
+    _audioHandler.stop();
     super.dispose();
   }
 
